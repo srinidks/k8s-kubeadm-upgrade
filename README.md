@@ -409,7 +409,7 @@ workernode2   Ready    <none>          511d   v1.30.12
 
 ---
 
-## Backup Files Reference
+## Backup Files Reference on the control plane (masternode1)
 
 | File | Location | Contains |
 |------|----------|----------|
@@ -418,6 +418,31 @@ workernode2   Ready    <none>          511d   v1.30.12
 | kubeconfig | `/root/k8s-backup-<date>/admin.conf` | Cluster admin access |
 | etcd data dir | `/root/etcd-data-backup-<date>/` | Raw etcd data |
 
+
+## Rollback Flow for your 3 control plane setup 
+Run this first to get your exact etcd member details:
+''''
+kubectl exec -n kube-system etcd-masternode1 -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  member list
+  '''
+
+ALL 3 control planes simultaneously:
+  
+  1. Stop etcd + apiserver      ← move .yaml manifests out of /etc/kubernetes/manifests/
+       ↓
+  2. Copy same .db file          ← scp backup to masternode2 and masternode3
+       ↓
+  3. etcdctl snapshot restore    ← different --name & --peer-urls per node, SAME snapshot
+       ↓
+  4. Swap data dir               ← mv /var/lib/etcd-restore → /var/lib/etcd
+       ↓
+  5. Restore manifests           ← move .yaml files back
+       ↓
+  6. Verify kubectl get nodes
 ---
 
 ## References
