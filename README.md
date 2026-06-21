@@ -420,6 +420,15 @@ workernode2   Ready    <none>          511d   v1.30.12
 
 
 ## Rollback Flow for your 3 control plane setup 
+
+🔴 ROLLBACK — How to Restore etcd if Something Goes Wrong
+> Use this if the cluster is broken after upgrade — API server down, nodes NotReady, pods missing, etc.
+⚠️ Rollback Rules
+Restore must be done on ALL 3 control plane nodes — not just one.
+Stop etcd on all control planes before restoring.
+Each node gets its own restore with its own peer URLs.
+Never restore from different snapshot files across nodes — use the same `.db` file on all nodes.
+---
 Run this first to get your exact etcd member details:
 
 ```
@@ -430,6 +439,157 @@ kubectl exec -n kube-system etcd-masternode1 -- etcdctl \
   --key=/etc/kubernetes/pki/etcd/server.key \
   member list
   ```
+# Also
+```
+cat /etc/kubernetes/manifests/etcd.yaml | grep -E "\-\-name|\-\-initial-advertise-peer-urls|\-\-initial-cluster="
+```
+Node	IP	Peer URL
+masternode1	198.18.8.15	https://198.18.8.15:2380
+masternode2	198.18.8.18	https://198.18.8.18:2380
+masternode3	198.18.8.19	https://198.18.8.19:2380
+Snapshot file: `/root/etcd-backup-20260621-175029.db`
+---
+Step 1 — Stop etcd and kube-apiserver on ALL 3 control planes
+SSH into masternode1, masternode2, masternode3 and run on each:
+```bash
+# Move static pod manifests out — this stops etcd and kube-apiserver
+mkdir -p /root/manifests-backup
+mv /etc/kubernetes/manifests/etcd.yaml /root/manifests-backup/
+mv /etc/kubernetes/manifests/kube-apiserver.yaml /root/manifests-backup/
+
+# Verify pods are stopped (should return nothing after ~30 seconds)
+crictl pods | grep etcd
+crictl pods | grep apiserver
+```
+---
+Step 2 — Copy snapshot to masternode2 and masternode3
+Run on masternode1:
+```bash
+scp /root/etcd-backup-20260621-175029.db root@198.18.8.18:/root/
+scp /root/etcd-backup-20260621-175029.db root@198.18.8.19:/root/
+
+# Verify file copied
+ssh root@198.18.8.18 "ls -lh /root/etcd-backup-20260621-175029.db"
+ssh root@198.18.8.19 "ls -lh /root/etcd-backup-20260621-175029.db"
+```
+---
+Step 3 — Restore snapshot (different command per node, same snapshot)
+On masternode1 (198.18.8.15):
+```bash
+ETCDCTL_API=3 etcdctl snapshot restore /root/etcd-backup-20260621-175029.db \
+  --name masternode1 \
+  --data-dir /var/lib/etcd-restore \
+  --initial-cluster masternode1=https://198.18.8.15:2380,masternode2=https://198.18.8.18:2380,masternode3=https://198.18.8.19:2380 \
+  --initial-cluster-token etcd-cluster-1 \
+  --initial-advertise-peer-urls https://198.18.8.15:2380
+```
+On masternode2 (198.18.8.18):
+```bash
+ETCDCTL_API=3 etcdctl snapshot restore /root/etcd-backup-20260621-175029.db \
+  --name masternode2 \
+  --data-dir /var/lib/etcd-restore \
+  --initial-cluster masternode1=https://198.18.8.15:2380,masternode2=https://198.18.8.18:2380,masternode3=https://198.18.8.19:2380 \
+  --initial-cluster-token etcd-cluster-1 \
+  --initial-advertise-peer-urls https://198.18.8.18:2380
+```
+On masternode3 (198.18.8.19):
+```bash
+ETCDCTL_API=3 etcdctl snapshot restore /root/etcd-backup-20260621-175029.db \
+  --name masternode3 \
+  --data-dir /var/lib/etcd-restore \
+  --initial-cluster masternode1=https://198.18.8.15:2380,masternode2=https://198.18.8.18:2380,masternode3=https://198.18.8.19:2380 \
+  --initial-cluster-token etcd-cluster-1 \
+  --initial-advertise-peer-urls https://198.18.8.19:2380
+```
+---
+Step 4 — Swap data directory on ALL 3 nodes
+On masternode1, masternode2, masternode3 — same command:
+```bash
+# Backup old corrupted data
+mv /var/lib/etcd /var/lib/etcd-old
+
+# Replace with restored data
+mv /var/lib/etcd-restore /var/lib/etcd
+
+# Fix ownership
+chown -R root:root /var/lib/etcd
+
+# Verify
+ls -lh /var/lib/etcd/
+```
+---
+Step 5 — Restore manifests on ALL 3 control planes
+On masternode1, masternode2, masternode3 — same command:
+```bash
+# Restore etcd and kube-apiserver manifests
+mv /root/manifests-backup/etcd.yaml /etc/kubernetes/manifests/
+mv /root/manifests-backup/kube-apiserver.yaml /etc/kubernetes/manifests/
+
+# Watch pods come back up (wait 60-90 seconds)
+watch crictl pods
+```
+---
+Step 6 — Verify cluster is back (from masternode1)
+```bash
+# Wait for API server to respond
+kubectl get nodes
+
+# Check etcd pods are running
+kubectl get pods -n kube-system | grep etcd
+
+# Verify etcd member list is healthy
+kubectl exec -n kube-system etcd-masternode1 -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  member list
+
+# Check all control plane components
+kubectl get pods -n kube-system
+
+# Verify API server health
+kubectl get --raw='/readyz?verbose'
+```
+Expected output:
+```
+NAME          STATUS   ROLES           AGE    VERSION
+masternode1   Ready    control-plane   511d   v1.29.x
+masternode2   Ready    control-plane   273d   v1.29.x
+masternode3   Ready    control-plane   273d   v1.29.x
+workernode1   Ready    <none>          511d   v1.29.x
+workernode2   Ready    <none>          511d   v1.29.x
+```
+---
+Rollback Summary
+```
+ALL 3 control planes:
+  Stop etcd + apiserver  (move manifests out)
+       ↓
+  Copy same .db backup file to all 3 nodes
+       ↓
+  etcdctl snapshot restore  (different --name and --advertise-peer-urls per node)
+       ↓
+  mv /var/lib/etcd-restore → /var/lib/etcd
+       ↓
+  Restore manifests  (move yaml files back)
+       ↓
+  Verify kubectl get nodes
+```
+---
+Common Rollback Errors
+Error	Cause	Fix
+`etcd` pod stuck in `CrashLoopBackOff`	Data dir mismatch	Re-check `/var/lib/etcd` ownership: `chown -R root:root /var/lib/etcd`
+`kubectl` not responding	API server not up yet	Wait 60–90 seconds, check `crictl pods`
+`cluster ID mismatch`	Different snapshots used on different nodes	Restore the same `.db` file on all 3 nodes
+`no such file` on restore	Wrong backup path	Run `ls /root/etcd-backup-*.db` to confirm filename
+Nodes show `NotReady`	kubelet not connected	Run `systemctl restart kubelet` on affected nodes
+---
+References
+Kubernetes Official Upgrade Docs
+kubeadm Upgrade Reference
+etcd Backup and Restore
+Kubernetes Version Skew Policy
 
 ALL 3 control planes simultaneously:
   
