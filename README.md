@@ -421,14 +421,15 @@ workernode2   Ready    <none>          511d   v1.30.12
 
 ## Rollback Flow for your 3 control plane setup 
 Run this first to get your exact etcd member details:
-''''
+
+```
 kubectl exec -n kube-system etcd-masternode1 -- etcdctl \
   --endpoints=https://127.0.0.1:2379 \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key \
   member list
-  '''
+  ```
 
 ALL 3 control planes simultaneously:
   
