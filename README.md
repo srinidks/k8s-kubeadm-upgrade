@@ -1,4 +1,4 @@
 # k8s-kubeadm-upgrade
-'''bash 
+''' bash 
 date
 kubectl get node '''
